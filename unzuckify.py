@@ -15,6 +15,8 @@ import xdg
 from typing import Dict
 
 
+VALID_COMMANDS = ["inbox", "send", "read"]
+
 class Unzuckify:
     ROOT_URL = "https://www.messenger.com"
     API_URL = f'{ROOT_URL}/api/graphql/'
@@ -58,62 +60,60 @@ class Unzuckify:
                 self.clear_cookies()
 
         if not chat_page_data:
-            unauthenticated_page_data = self.get_unauthenticated_page_data()
-            self.do_login(unauthenticated_page_data)
+            self.login()
             self.save_cookies()
             self.logger.debug(f"[cookie] WRITE {self.get_cookies_path()}")
             chat_page_data = self.get_chat_page_data()
-            assert chat_page_data, "auth failed"
+            assert chat_page_data, "auth failed"    # TODO handle exception
+
         script_data = get_script_data(chat_page_data)
+
         if args.cmd == "inbox":
             inbox_js = self.get_inbox_js(chat_page_data, script_data)
             inbox_data = get_inbox_data(inbox_js)
             print(json.dumps(inbox_data))   # TODO should be logged
 
-        elif args.cmd == "send":
-            self.interact_with_thread(
-                chat_page_data, script_data, args.thread, args.message
-            )
         elif args.cmd == "read":
             for thread_id in args.thread:
                 self.interact_with_thread(
                     chat_page_data, script_data, thread_id
                 )
+
+        elif args.cmd == "send":
+            self.interact_with_thread(
+                chat_page_data, script_data, args.thread, args.message
+            )
+
         else:
-            assert False, args.cmd
+            raise Exception(f'Invalid command type - "{args.cmd}"')
 
-
-    def get_unauthenticated_page_data(self):
+    def login(self) -> None:
+        # grab necessary values from the root site before authenticating
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL} (unauthenticated)")
-        page = self.messenger_session.get(Unzuckify.ROOT_URL, allow_redirects=False)
-        page.raise_for_status()
-        return {
-            "datr": Unzuckify.DATR_REGEX.search(page.text).group(1),
-            "lsd": Unzuckify.LSD_REGEX.search(page.text).group(1),
-            "initial_request_id": Unzuckify.INITIAL_REQUEST_ID_REGEX.search(page.text).group(1),
-        }
+        page = self.messenger_session.get(Unzuckify.ROOT_URL)
+        datr = Unzuckify.DATR_REGEX.search(page.text).group(1)
+        lsd = Unzuckify.LSD_REGEX.search(page.text).group(1)
+        initial_request_id = Unzuckify.INITIAL_REQUEST_ID_REGEX.search(page.text).group(1)
 
-    def do_login(self, unauthenticated_page_data):
+        # log in
         self.logger.debug(f"[http] POST {Unzuckify.LOGIN_URL}")
         self.messenger_session.post(
             Unzuckify.LOGIN_URL,
-            cookies={"datr": unauthenticated_page_data["datr"]},
+            cookies={"datr": datr},
             data={
-                "lsd": unauthenticated_page_data["lsd"],
-                "initial_request_id": unauthenticated_page_data["initial_request_id"],
+                "lsd": lsd,
+                "initial_request_id": initial_request_id,
                 "email": self.config['auth_info']['email'],
                 "pass": self.config['auth_info']['password'],
                 "login": "1",
                 "persistent": "1",
-            },
-            allow_redirects=False,
+            }
         )
 
     def get_chat_page_data(self):
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL}")
         page = self.messenger_session.get(
-            Unzuckify.ROOT_URL,
-            allow_redirects=True,
+            Unzuckify.ROOT_URL
         )
         maybe_schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(page.text) or Unzuckify.VERSION_REGEX.search(page.text)
         return {
@@ -422,6 +422,9 @@ def main():
     # allow the user to override the log level if specified as an argument
     if args.log_level:
         config["logging"]["log_level"] = args.log_level
+
+    if args.cmd not in VALID_COMMANDS:
+        raise Exception(f'Invalid command type - "{args.cmd}"')
 
     zuck = Unzuckify(config)
     zuck.do_main(args)
