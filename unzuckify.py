@@ -6,32 +6,39 @@ import concurrent.futures
 import datetime
 import json
 import logging
+import os
 import random
 import re
+from typing import Dict
 
 import esprima
 import requests
 import xdg
-from typing import Dict
-
 
 VALID_COMMANDS = ["inbox", "send", "read"]
 
+
 class Unzuckify:
     ROOT_URL = "https://www.messenger.com"
-    API_URL = f'{ROOT_URL}/api/graphql/'
+    API_URL = f"{ROOT_URL}/api/graphql/"
     LOGIN_URL = f"{ROOT_URL}/login/password"
 
     DATR_REGEX = re.compile(r'"_js_datr",\s*"([^"]+)"')
     LSD_REGEX = re.compile(r'name="lsd"\s+value="([^"]+)"')
-    INITIAL_REQUEST_ID_REGEX = re.compile(r'name="initial_request_id"\s+value="([^"]+)"')
+    INITIAL_REQUEST_ID_REGEX = re.compile(
+        r'name="initial_request_id"\s+value="([^"]+)"'
+    )
     SCHEMA_VERSION_REGEX = re.compile(r'"schemaVersion"\s*:\s*"([^"]+)"')
     VERSION_REGEX = re.compile(r'\\"version\\":([0-9]{2,})')
     DEVICE_ID_REGEX = re.compile(r'"(?:deviceId|clientID)"\s*:\s*"([^"]+)"')
     DTSG_REGEX = re.compile(r'DTSG.{,20}"token":"([^"]+)"')
     SCRIPTS_REGEX = re.compile(r'"([^"]+rsrc\.php/[^"]+\.js[^"]+)"')
-    LSVERSION_REGEX = re.compile(r'__d\s*\(\s*"LSVersion".{,50}exports\s*=\s*"([0-9]+)"')
-    QUERY_ID_REGEX = re.compile(r'id:\s*"([0-9]+)".{,50}name:\s*"LSPlatformGraphQLLightspeedRequestQuery"')
+    LSVERSION_REGEX = re.compile(
+        r'__d\s*\(\s*"LSVersion".{,50}exports\s*=\s*"([0-9]+)"'
+    )
+    QUERY_ID_REGEX = re.compile(
+        r'id:\s*"([0-9]+)".{,50}name:\s*"LSPlatformGraphQLLightspeedRequestQuery"'
+    )
 
     def __init__(self, config: Dict) -> None:
         self.config = config
@@ -44,40 +51,48 @@ class Unzuckify:
 
         if "gotify" in logging_conf:
             from gotify_handler import GotifyHandler
+
             self.logger.addHandler(GotifyHandler(**logging_conf["gotify"]))
 
         # messenger session setup
         self.messenger_session = requests.Session()
-        self.messenger_session.hooks["response"] = lambda r, *args, **kwargs: r.raise_for_status()
+        self.messenger_session.hooks[
+            "response"
+        ] = lambda r, *args, **kwargs: r.raise_for_status()
 
     def do_main(self, args):
         chat_page_data = None
-        if not args.no_cookies and self.load_cookies():
-            self.logger.debug(f"[cookie] READ {self.get_cookies_path()}")
-            chat_page_data = self.get_chat_page_data()
+        if not args.no_cookies:
+            self.logger.debug(f"[cookie] READ {self.config['cookie_file_path']}")
+            try:
+                self.load_cookies()
+                chat_page_data = self.get_chat_page_data()
+
+            except BaseException:
+                pass
+
             if not chat_page_data:
                 self.logger.debug(f"[cookie] CLEAR due to failed auth")
                 self.clear_cookies()
 
         if not chat_page_data:
             self.login()
+            self.logger.debug(f"[cookie] WRITE {self.config['cookie_file_path']}")
             self.save_cookies()
-            self.logger.debug(f"[cookie] WRITE {self.get_cookies_path()}")
             chat_page_data = self.get_chat_page_data()
-            assert chat_page_data, "auth failed"    # TODO handle exception
+
+        assert chat_page_data, "auth failed"  # TODO handle exception
 
         script_data = get_script_data(chat_page_data)
 
         if args.cmd == "inbox":
             inbox_js = self.get_inbox_js(chat_page_data, script_data)
             inbox_data = get_inbox_data(inbox_js)
-            print(json.dumps(inbox_data))   # TODO should be logged
+            print(json.dumps(inbox_data))  # TODO should be logged
 
         elif args.cmd == "read":
             for thread_id in args.thread:
-                self.interact_with_thread(
-                    chat_page_data, script_data, thread_id
-                )
+                self.interact_with_thread(chat_page_data, script_data, thread_id)
 
         elif args.cmd == "send":
             self.interact_with_thread(
@@ -93,7 +108,9 @@ class Unzuckify:
         page = self.messenger_session.get(Unzuckify.ROOT_URL)
         datr = Unzuckify.DATR_REGEX.search(page.text).group(1)
         lsd = Unzuckify.LSD_REGEX.search(page.text).group(1)
-        initial_request_id = Unzuckify.INITIAL_REQUEST_ID_REGEX.search(page.text).group(1)
+        initial_request_id = Unzuckify.INITIAL_REQUEST_ID_REGEX.search(page.text).group(
+            1
+        )
 
         # log in
         self.logger.debug(f"[http] POST {Unzuckify.LOGIN_URL}")
@@ -103,27 +120,25 @@ class Unzuckify:
             data={
                 "lsd": lsd,
                 "initial_request_id": initial_request_id,
-                "email": self.config['auth_info']['email'],
-                "pass": self.config['auth_info']['password'],
+                "email": self.config["auth_info"]["email"],
+                "pass": self.config["auth_info"]["password"],
                 "login": "1",
                 "persistent": "1",
-            }
+            },
         )
 
     def get_chat_page_data(self):
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL}")
-        page = self.messenger_session.get(
-            Unzuckify.ROOT_URL
-        )
-        maybe_schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(page.text) or Unzuckify.VERSION_REGEX.search(page.text)
+        page = self.messenger_session.get(Unzuckify.ROOT_URL)
+        maybe_schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(
+            page.text
+        ) or Unzuckify.VERSION_REGEX.search(page.text)
         return {
             "device_id": Unzuckify.DEVICE_ID_REGEX.search(page.text).group(1),
             "maybe_schema_version": maybe_schema_match and maybe_schema_match.group(1),
             "dtsg": Unzuckify.DTSG_REGEX.search(page.text).group(1),
             # TODO why is this sorted?
-            "scripts": sorted(
-                set(Unzuckify.SCRIPTS_REGEX.findall(page.text))
-            ),
+            "scripts": sorted(set(Unzuckify.SCRIPTS_REGEX.findall(page.text))),
         }
 
     def interact_with_thread(
@@ -134,7 +149,8 @@ class Unzuckify:
         message=None,
     ):
         schema_version = (
-            chat_page_data["maybe_schema_version"] or script_data["maybe_schema_version"]
+            chat_page_data["maybe_schema_version"]
+            or script_data["maybe_schema_version"]
         )
 
         # TODO make more readable
@@ -197,10 +213,12 @@ class Unzuckify:
                 ),
             },
         )
+
     def get_inbox_js(self, chat_page_data, script_data):
         self.logger.debug(f"[http] POST {Unzuckify.API_URL}")
         schema_version = (
-            chat_page_data["maybe_schema_version"] or script_data["maybe_schema_version"]
+            chat_page_data["maybe_schema_version"]
+            or script_data["maybe_schema_version"]
         )
         assert schema_version
         graph = self.messenger_session.post(
@@ -226,79 +244,61 @@ class Unzuckify:
         )
         return graph.json()["data"]["viewer"]["lightspeed_web_request"]["payload"]
 
-    def load_cookies(self):
+    def load_cookies(self) -> None:
+        """
+        Simple function to clear and re-load messenger cookies
+
+        :rtype: None
+        """
+
         self.messenger_session.cookies.clear()
-        try:
-            with open(self.get_cookies_path()) as f:
-                cookies = json.load(f).get(self.config['auth_info']['email'])
-        except FileNotFoundError:
-            return False
-        except json.JSONDecodeError:
-            return False
-        if not cookies:
-            return False
+        with open(self.config["cookie_file_path"]) as f:
+            cookies = json.load(f).get(self.config["auth_info"]["email"])
+
         self.messenger_session.cookies.update(cookies)
-        return True
+        return
 
-    def get_cookies_path(self):
-        # TODO change this
-        return xdg.xdg_cache_home() / "unzuckify" / "cookies.json"
+    def save_cookies(self) -> None:
+        """
+        Simple function to save the messenger session's cookies to disk
 
+        :rtype: None
+        """
 
-
-
-    def save_cookies(self):
-        # TODO simplify this
-        path = self.get_cookies_path()
+        path = self.config["cookie_file_path"]
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "a+") as f:
-            f.seek(0)
-            try:
-                data = json.load(f)
-            except json.JSONDecodeError:
-                data = {}
-            data[self.config['auth_info']['email']] = dict(self.messenger_session.cookies)
-            f.seek(0)
-            f.truncate()
-            json.dump(data, f, indent=2)
-            f.write("\n")
+        cookie_dict = {
+            self.config["auth_info"]["email"]: dict(self.messenger_session.cookies)
+        }
 
+        with open(path, "w") as f:
+            json.dump(cookie_dict, f)
 
-    def clear_cookies(self):
-        # TODO simplify this
+    def clear_cookies(self) -> None:
+        """
+        Simple function to clear the messenger session's cookies and
+        remove locally stored cookies
+
+        :rtype: None
+        """
+
         self.messenger_session.cookies.clear()
-        path = self.get_cookies_path()
-        try:
-            with open(path, "a+") as f:
-                f.seek(0)
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    data = {}
-                try:
-                    data.pop(self.config['auth_info']['email'])
-                except KeyError:
-                    pass
-                if not data:
-                    path.unlink()
-                f.seek(0)
-                f.truncate()
-                json.dump(data, f, indent=2)
-                f.write("\n")
-        except FileNotFoundError:
-            pass
+
+        path = self.config["cookie_file_path"]
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def get_script_data(chat_page_data):
     # TODO simplify this
     def get(url):
-        #logger.debug(f"[http] GET {url}")
+        # logger.debug(f"[http] GET {url}")
         return requests.get(url)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         scripts = executor.map(get, chat_page_data["scripts"])
     for script in scripts:
-        script.raise_for_status()   # TODO should this be an unauthenticated call?
+        script.raise_for_status()  # TODO should this be an unauthenticated call?
 
         if "LSPlatformGraphQLLightspeedRequestQuery" not in script.text:
             continue
@@ -414,6 +414,7 @@ def parse_args():
     cmd_read.add_argument("-t", "--thread", required=True, type=int, action="append")
     return parser.parse_args()
 
+
 def main():
     args = parse_args()
     with open(args.config, "r") as f:
@@ -425,6 +426,10 @@ def main():
 
     if args.cmd not in VALID_COMMANDS:
         raise Exception(f'Invalid command type - "{args.cmd}"')
+
+    # set defaults for required config params if not present
+    if "cookie_file_path" not in config:
+        config["cookie_file_path"] = "./cookies.json"
 
     zuck = Unzuckify(config)
     zuck.do_main(args)
