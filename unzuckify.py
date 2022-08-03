@@ -2,18 +2,16 @@
 
 import argparse
 import collections
-import concurrent.futures
 import datetime
 import json
 import logging
 import os
 import random
 import re
-from typing import Dict
+from typing import Dict, Set
 
 import esprima
 import requests
-import xdg
 
 VALID_COMMANDS = ["inbox", "send", "read"]
 
@@ -83,26 +81,29 @@ class Unzuckify:
 
         assert chat_page_data, "auth failed"  # TODO handle exception
 
-        script_data = get_script_data(chat_page_data)
-
         if args.cmd == "inbox":
-            inbox_js = self.get_inbox_js(chat_page_data, script_data)
+            inbox_js = self.get_inbox_js(**chat_page_data)
             inbox_data = get_inbox_data(inbox_js)
             print(json.dumps(inbox_data))  # TODO should be logged
 
         elif args.cmd == "read":
             for thread_id in args.thread:
-                self.interact_with_thread(chat_page_data, script_data, thread_id)
+                self.interact_with_thread(**chat_page_data, thread_id=thread_id)
 
         elif args.cmd == "send":
             self.interact_with_thread(
-                chat_page_data, script_data, args.thread, args.message
+                **chat_page_data, thread_id=args.thread, message=args.message
             )
 
         else:
             raise Exception(f'Invalid command type - "{args.cmd}"')
 
     def login(self) -> None:
+        """
+        Logs into messenger
+
+        :rtype: None
+        """
         # grab necessary values from the root site before authenticating
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL} (unauthenticated)")
         page = self.messenger_session.get(Unzuckify.ROOT_URL)
@@ -127,31 +128,34 @@ class Unzuckify:
             },
         )
 
-    def get_chat_page_data(self):
+    def get_chat_page_data(self) -> Dict:
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL}")
         page = self.messenger_session.get(Unzuckify.ROOT_URL)
-        maybe_schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(
+        schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(
             page.text
         ) or Unzuckify.VERSION_REGEX.search(page.text)
-        return {
+
+        script_urls = set(Unzuckify.SCRIPTS_REGEX.findall(page.text))
+
+        return_dict = {
             "device_id": Unzuckify.DEVICE_ID_REGEX.search(page.text).group(1),
-            "maybe_schema_version": maybe_schema_match and maybe_schema_match.group(1),
+            "schema_version": schema_match and schema_match.group(1),
             "dtsg": Unzuckify.DTSG_REGEX.search(page.text).group(1),
-            # TODO why is this sorted?
-            "scripts": sorted(set(Unzuckify.SCRIPTS_REGEX.findall(page.text))),
         }
+
+        # TODO this may override `schema_version` with an invalid value?
+        return_dict.update(get_script_data(script_urls))
+        return return_dict
 
     def interact_with_thread(
         self,
-        chat_page_data,
-        script_data,
+        schema_version,
+        query_id: str,
+        dtsg: str,
+        device_id: str,
         thread_id,
         message=None,
     ):
-        schema_version = (
-            chat_page_data["maybe_schema_version"]
-            or script_data["maybe_schema_version"]
-        )
 
         # TODO make more readable
         timestamp = int(datetime.datetime.now().timestamp() * 1000)
@@ -195,11 +199,11 @@ class Unzuckify:
         self.messenger_session.post(
             Unzuckify.API_URL,
             data={
-                "doc_id": script_data["query_id"],
-                "fb_dtsg": chat_page_data["dtsg"],
+                "doc_id": query_id,
+                "fb_dtsg": dtsg,
                 "variables": json.dumps(
                     {
-                        "deviceId": chat_page_data["device_id"],
+                        "deviceId": device_id,
                         "requestId": 0,
                         "requestPayload": json.dumps(
                             {
@@ -214,29 +218,23 @@ class Unzuckify:
             },
         )
 
-    def get_inbox_js(self, chat_page_data, script_data):
+    def get_inbox_js(self, schema_version, query_id: str, dtsg: str, device_id) -> str:
         self.logger.debug(f"[http] POST {Unzuckify.API_URL}")
-        schema_version = (
-            chat_page_data["maybe_schema_version"]
-            or script_data["maybe_schema_version"]
-        )
-        assert schema_version
         graph = self.messenger_session.post(
             Unzuckify.API_URL,
             data={
-                "doc_id": script_data["query_id"],
-                "fb_dtsg": chat_page_data["dtsg"],
+                "doc_id": query_id,
+                "fb_dtsg": dtsg,
                 "variables": json.dumps(
                     {
-                        "deviceId": chat_page_data["device_id"],
+                        "deviceId": device_id,
                         "requestId": 0,
-                        "requestPayload": json.dumps(
+                        "requestPayload":
                             {
                                 "database": 1,
                                 "version": schema_version,
-                                "sync_params": json.dumps({}),
-                            }
-                        ),
+                                "sync_params": {},
+                            },
                         "requestType": 1,
                     }
                 ),
@@ -289,41 +287,50 @@ class Unzuckify:
             os.remove(path)
 
 
-def get_script_data(chat_page_data):
-    # TODO simplify this
-    def get(url):
-        # logger.debug(f"[http] GET {url}")
-        return requests.get(url)
+def get_script_data(script_urls: Set[str]) -> Dict:
+    """
+    Given a list of script URLS,
+    request each and extract "query_id" and "schema_version"
+    from the first script that contains them.
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        scripts = executor.map(get, chat_page_data["scripts"])
-    for script in scripts:
-        script.raise_for_status()  # TODO should this be an unauthenticated call?
+    :param script_urls: A set of URLs
+    :type script_urls: Set[str]
+    :return: A dict containing "query_id" and "maybe_schema_version"
+    :rtype: Dict
+    """
 
-        if "LSPlatformGraphQLLightspeedRequestQuery" not in script.text:
+    for script_url in script_urls:
+        res = requests.get(script_url)
+        res.raise_for_status()
+
+        if "LSPlatformGraphQLLightspeedRequestQuery" not in res.text:
             continue
 
-        maybe_schema_match = Unzuckify.LSVERSION_REGEX.search(script.text)
+        maybe_schema_match = Unzuckify.LSVERSION_REGEX.search(res.text)
 
         return {
-            "query_id": Unzuckify.QUERY_ID_REGEX.search(script.text).group(1),
-            "maybe_schema_version": maybe_schema_match and maybe_schema_match.group(1),
+            "query_id": Unzuckify.QUERY_ID_REGEX.search(script_res.text).group(1),
+            "schema_version": maybe_schema_match and maybe_schema_match.group(1),
         }
 
-    # TODO change return type
-    assert False, "no script had LSPlatformGraphQLLightspeedRequestQuery"
+    raise Exception("LSPlatformGraphQLLightspeedRequestQuery not found")
 
 
 def node_to_literal(node):
     if node.type == "Literal":
         return node.value
-    if node.type == "ArrayExpression":
+
+    elif node.type == "ArrayExpression":
         return [node_to_literal(elt) for elt in node.elements]
-    if node.type == "Identifier" and node.name == "U":
+
+    elif node.type == "Identifier" and node.name == "U":
         return None
-    if node.type == "UnaryExpression" and node.prefix and node.operator == "-":
+
+    elif node.type == "UnaryExpression" and node.prefix and node.operator == "-":
         return -node_to_literal(node.argument)
-    return f"<{node.type}>"
+
+    else:
+        return f"<{node.type}>"
 
 
 def read_lightspeed_call(node):
@@ -343,7 +350,7 @@ def convert_fbid(l):
     return (2**32) * l[0] + l[1]
 
 
-def get_inbox_data(inbox_js):
+def get_inbox_data(inbox_js) -> Dict[str, Dict]:
     lightspeed_calls = collections.defaultdict(list)
 
     def delegate(node, meta):
@@ -355,20 +362,20 @@ def get_inbox_data(inbox_js):
 
     esprima.parseScript(inbox_js, delegate=delegate)
 
-    users = {}
-    conversations = {}
+    users = dict()
+    conversations = dict()
 
     for args in lightspeed_calls["deleteThenInsertThread"]:
         last_sent_ts, last_read_ts, last_msg, group_name, *rest = args
         thread_id, last_msg_author = [
             arg for arg in rest if isinstance(arg, list) and arg[0] > 0
-        ][:2]
+            ][:2]   # TODO what's with the [:2] at the end?
         conversations[convert_fbid(thread_id)] = {
             "unread": last_sent_ts != last_read_ts,
             "last_message": last_msg,
             "last_message_author": convert_fbid(last_msg_author),
             "group_name": group_name,
-            "participants": [],
+            "participants": list(),
         }
 
     for args in lightspeed_calls["addParticipantIdToGroupThread"]:
@@ -388,7 +395,7 @@ def get_inbox_data(inbox_js):
             break
 
     my_user_ids = [uid for uid in users if users[uid]["is_me"]]
-    assert len(my_user_ids) == 1
+    assert len(my_user_ids) == 1    # TODO handle exception
     (my_user_id,) = my_user_ids
 
     for conversation in conversations.values():
