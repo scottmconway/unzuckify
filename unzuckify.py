@@ -13,18 +13,6 @@ import esprima
 import requests
 import xdg
 
-with open("config.json", "r") as f:
-    global_config = json.load(f)
-
-logger = logging.getLogger("unzuckify")
-logging.basicConfig()
-logging_conf = global_config.get("logging", dict())
-logger.setLevel(logging_conf.get("log_level", logging.INFO))
-if "gotify" in logging_conf:
-    from gotify_handler import GotifyHandler
-
-    logger.addHandler(GotifyHandler(**logging_conf["gotify"]))
-
 
 def get_cookies_path():
     return xdg.xdg_cache_home() / "unzuckify" / "cookies.json"
@@ -400,9 +388,10 @@ def do_main(args):
 
 def main():
     parser = argparse.ArgumentParser("unzuckify")
+    parser.add_argument("--config", type=str, default="./config.json")
     parser.add_argument("-u", "--email", required=True)
     parser.add_argument("-p", "--password", required=True)
-    parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-ll", "--log-level", type=int, default=None)
     parser.add_argument("-n", "--no-cookies", action="store_true")
     subparsers = parser.add_subparsers(dest="cmd")
     cmd_inbox = subparsers.add_parser("inbox")
@@ -412,8 +401,29 @@ def main():
     cmd_read = subparsers.add_parser("read")
     cmd_read.add_argument("-t", "--thread", required=True, type=int, action="append")
     args = parser.parse_args()
-    if args.verbose:
-        global_config["verbose"] = True
+
+    global global_config
+    global logger
+
+    with open(args.config, "r") as f:
+        global_config = json.load(f)
+
+    # logging setup
+    logger = logging.getLogger("unzuckify")
+    logging.basicConfig()
+    logging_conf = global_config.get("logging", dict())
+
+    # allow the user to override the log level if specified as an argument
+    if args.log_level:
+        logger.setLevel(args.log_level)
+    else:
+        logger.setLevel(logging_conf.get(["log_level"], logging.WARNING))
+
+    if "gotify" in logging_conf:
+        from gotify_handler import GotifyHandler
+
+        logger.addHandler(GotifyHandler(**logging_conf["gotify"]))
+
     do_main(args)
 
 
