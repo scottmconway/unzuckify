@@ -229,12 +229,11 @@ class Unzuckify:
                     {
                         "deviceId": device_id,
                         "requestId": 0,
-                        "requestPayload":
-                            {
-                                "database": 1,
-                                "version": schema_version,
-                                "sync_params": {},
-                            },
+                        "requestPayload": {
+                            "database": 1,
+                            "version": schema_version,
+                            "sync_params": {},
+                        },
                         "requestType": 1,
                     }
                 ),
@@ -369,7 +368,9 @@ def get_inbox_data(inbox_js) -> Dict[str, Dict]:
         last_sent_ts, last_read_ts, last_msg, group_name, *rest = args
         thread_id, last_msg_author = [
             arg for arg in rest if isinstance(arg, list) and arg[0] > 0
-            ][:2]   # TODO what's with the [:2] at the end?
+        ][
+            :2
+        ]  # TODO what's with the [:2] at the end?
         conversations[convert_fbid(thread_id)] = {
             "unread": last_sent_ts != last_read_ts,
             "last_message": last_msg,
@@ -395,7 +396,7 @@ def get_inbox_data(inbox_js) -> Dict[str, Dict]:
             break
 
     my_user_ids = [uid for uid in users if users[uid]["is_me"]]
-    assert len(my_user_ids) == 1    # TODO handle exception
+    assert len(my_user_ids) == 1  # TODO handle exception
     (my_user_id,) = my_user_ids
 
     for conversation in conversations.values():
