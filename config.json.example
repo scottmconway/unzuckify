@@ -1,0 +1,10 @@
+{
+    "verbose": false,
+    "logging": {
+        "log_level": 30,
+        "gotify": {
+            "app_token": "",
+            "server_url": ""
+        }
+    }
+}

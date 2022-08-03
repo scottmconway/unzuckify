@@ -5,6 +5,7 @@ import collections
 import concurrent.futures
 import datetime
 import json
+import logging
 import random
 import re
 
@@ -12,12 +13,17 @@ import esprima
 import requests
 import xdg
 
-global_config = {"verbose": False}
+with open("config.json", "r") as f:
+    global_config = json.load(f)
 
+logger = logging.getLogger("unzuckify")
+logging.basicConfig()
+logging_conf = global_config.get("logging", dict())
+logger.setLevel(logging_conf.get("log_level", logging.INFO))
+if "gotify" in logging_conf:
+    from gotify_handler import GotifyHandler
 
-def log(msg):
-    if global_config["verbose"]:
-        print(msg)
+    logger.addHandler(GotifyHandler(**logging_conf["gotify"]))
 
 
 def get_cookies_path():
@@ -81,7 +87,7 @@ def clear_cookies(session, email):
 
 def get_unauthenticated_page_data(session):
     url = "https://www.messenger.com"
-    log(f"[http] GET {url} (unauthenticated)")
+    logger.debug(f"[http] GET {url} (unauthenticated)")
     page = session.get(url, allow_redirects=False)
     page.raise_for_status()
     return {
@@ -95,7 +101,7 @@ def get_unauthenticated_page_data(session):
 
 def do_login(session, unauthenticated_page_data, credentials):
     url = "https://www.messenger.com/login/password/"
-    log(f"[http] POST {url}")
+    logger.debug(f"[http] POST {url}")
     resp = session.post(
         url,
         cookies={"datr": unauthenticated_page_data["datr"]},
@@ -114,7 +120,7 @@ def do_login(session, unauthenticated_page_data, credentials):
 
 def get_chat_page_data(session):
     url = "https://www.messenger.com"
-    log(f"[http] GET {url}")
+    logger.debug(f"[http] GET {url}")
     page = session.get(
         url,
         allow_redirects=True,
@@ -139,7 +145,7 @@ def get_chat_page_data(session):
 
 def get_script_data(session, chat_page_data):
     def get(url):
-        log(f"[http] GET {url}")
+        logger.debug(f"[http] GET {url}")
         return requests.get(url)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -188,7 +194,7 @@ def read_lightspeed_call(node):
 
 def get_inbox_js(session, chat_page_data, script_data):
     url = "https://www.messenger.com/api/graphql/"
-    log(f"[http] POST {url}")
+    logger.debug(f"[http] POST {url}")
     schema_version = (
         chat_page_data["maybe_schema_version"] or script_data["maybe_schema_version"]
     )
@@ -289,7 +295,7 @@ def interact_with_thread(
         chat_page_data["maybe_schema_version"] or script_data["maybe_schema_version"]
     )
     url = "https://www.messenger.com/api/graphql/"
-    log(f"[http] POST {url}")
+    logger.debug(f"[http] POST {url}")
     timestamp = int(datetime.datetime.now().timestamp() * 1000)
     epoch = timestamp << 22
     tasks = [
@@ -351,52 +357,45 @@ def interact_with_thread(
 
 
 def do_main(args):
-    with requests.session() as session:
-        chat_page_data = None
-        if not args.no_cookies and load_cookies(session, args.email):
-            log(f"[cookie] READ {get_cookies_path()}")
-            log(json.dumps(dict(session.cookies), indent=2))
-            chat_page_data = get_chat_page_data(session)
-            if not chat_page_data:
-                log(f"[cookie] CLEAR due to failed auth")
-                clear_cookies(session, args.email)
+    messenger_session = requests.Session()
+
+    chat_page_data = None
+    if not args.no_cookies and load_cookies(messenger_session, args.email):
+        logger.debug(f"[cookie] READ {get_cookies_path()}")
+        chat_page_data = get_chat_page_data(messenger_session)
         if not chat_page_data:
-            unauthenticated_page_data = get_unauthenticated_page_data(session)
-            log(json.dumps(unauthenticated_page_data, indent=2))
-            do_login(
-                session,
-                unauthenticated_page_data,
-                {
-                    "email": args.email,
-                    "password": args.password,
-                },
-            )
-            log(json.dumps(dict(session.cookies), indent=2))
-            save_cookies(session, args.email)
-            log(f"[cookie] WRITE {get_cookies_path()}")
-            chat_page_data = get_chat_page_data(session)
-            assert chat_page_data, "auth failed"
-        log(
-            json.dumps(
-                chat_page_data,
-                indent=2,
-            ),
+            logger.debug(f"[cookie] CLEAR due to failed auth")
+            clear_cookies(messenger_session, args.email)
+    if not chat_page_data:
+        unauthenticated_page_data = get_unauthenticated_page_data(messenger_session)
+        do_login(
+            messenger_session,
+            unauthenticated_page_data,
+            {
+                "email": args.email,
+                "password": args.password,
+            },
         )
-        script_data = get_script_data(session, chat_page_data)
-        log(json.dumps(script_data, indent=2))
-        if args.cmd == "inbox":
-            inbox_js = get_inbox_js(session, chat_page_data, script_data)
-            inbox_data = get_inbox_data(inbox_js)
-            print(json.dumps(inbox_data))
-        elif args.cmd == "send":
+        save_cookies(messenger_session, args.email)
+        logger.debug(f"[cookie] WRITE {get_cookies_path()}")
+        chat_page_data = get_chat_page_data(messenger_session)
+        assert chat_page_data, "auth failed"
+    script_data = get_script_data(messenger_session, chat_page_data)
+    if args.cmd == "inbox":
+        inbox_js = get_inbox_js(messenger_session, chat_page_data, script_data)
+        inbox_data = get_inbox_data(inbox_js)
+        print(json.dumps(inbox_data))
+    elif args.cmd == "send":
+        interact_with_thread(
+            messenger_session, chat_page_data, script_data, args.thread, args.message
+        )
+    elif args.cmd == "read":
+        for thread_id in args.thread:
             interact_with_thread(
-                session, chat_page_data, script_data, args.thread, args.message
+                messenger_session, chat_page_data, script_data, thread_id
             )
-        elif args.cmd == "read":
-            for thread_id in args.thread:
-                interact_with_thread(session, chat_page_data, script_data, thread_id)
-        else:
-            assert False, args.cmd
+    else:
+        assert False, args.cmd
 
 
 def main():
