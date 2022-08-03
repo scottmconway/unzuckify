@@ -7,19 +7,17 @@ import datetime
 import json
 import random
 import re
-import sys
 
 import esprima
 import requests
 import xdg
-
 
 global_config = {"verbose": False}
 
 
 def log(msg):
     if global_config["verbose"]:
-        print(msg, file=sys.stderr)
+        print(msg)
 
 
 def get_cookies_path():
@@ -221,7 +219,7 @@ def get_inbox_js(session, chat_page_data, script_data):
 
 
 def convert_fbid(l):
-    return (2 ** 32) * l[0] + l[1]
+    return (2**32) * l[0] + l[1]
 
 
 def get_inbox_data(inbox_js):
@@ -309,7 +307,7 @@ def interact_with_thread(
         }
     ]
     if message:
-        otid = epoch + random.randrange(2 ** 22)
+        otid = epoch + random.randrange(2**22)
         tasks.insert(
             0,
             {
@@ -389,7 +387,7 @@ def do_main(args):
         if args.cmd == "inbox":
             inbox_js = get_inbox_js(session, chat_page_data, script_data)
             inbox_data = get_inbox_data(inbox_js)
-            print(json.dumps(inbox_data, indent=2 if sys.stdout.isatty() else None))
+            print(json.dumps(inbox_data))
         elif args.cmd == "send":
             interact_with_thread(
                 session, chat_page_data, script_data, args.thread, args.message
@@ -422,4 +420,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    sys.exit(0)
