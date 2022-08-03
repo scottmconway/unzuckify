@@ -16,6 +16,21 @@ from typing import Dict
 
 
 class Unzuckify:
+    ROOT_URL = "https://www.messenger.com"
+    API_URL = f'{ROOT_URL}/api/graphql/'
+    LOGIN_URL = f"{ROOT_URL}/login/password"
+
+    DATR_REGEX = re.compile(r'"_js_datr",\s*"([^"]+)"')
+    LSD_REGEX = re.compile(r'name="lsd"\s+value="([^"]+)"')
+    INITIAL_REQUEST_ID_REGEX = re.compile(r'name="initial_request_id"\s+value="([^"]+)"')
+    SCHEMA_VERSION_REGEX = re.compile(r'"schemaVersion"\s*:\s*"([^"]+)"')
+    VERSION_REGEX = re.compile(r'\\"version\\":([0-9]{2,})')
+    DEVICE_ID_REGEX = re.compile(r'"(?:deviceId|clientID)"\s*:\s*"([^"]+)"')
+    DTSG_REGEX = re.compile(r'DTSG.{,20}"token":"([^"]+)"')
+    SCRIPTS_REGEX = re.compile(r'"([^"]+rsrc\.php/[^"]+\.js[^"]+)"')
+    LSVERSION_REGEX = re.compile(r'__d\s*\(\s*"LSVersion".{,50}exports\s*=\s*"([0-9]+)"')
+    QUERY_ID_REGEX = re.compile(r'id:\s*"([0-9]+)".{,50}name:\s*"LSPlatformGraphQLLightspeedRequestQuery"')
+
     def __init__(self, config: Dict) -> None:
         self.config = config
 
@@ -69,23 +84,19 @@ class Unzuckify:
 
 
     def get_unauthenticated_page_data(self):
-        url = "https://www.messenger.com"
-        self.logger.debug(f"[http] GET {url} (unauthenticated)")
-        page = self.messenger_session.get(url, allow_redirects=False)
+        self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL} (unauthenticated)")
+        page = self.messenger_session.get(Unzuckify.ROOT_URL, allow_redirects=False)
         page.raise_for_status()
         return {
-            "datr": re.search(r'"_js_datr",\s*"([^"]+)"', page.text).group(1),
-            "lsd": re.search(r'name="lsd"\s+value="([^"]+)"', page.text).group(1),
-            "initial_request_id": re.search(
-                r'name="initial_request_id"\s+value="([^"]+)"', page.text
-            ).group(1),
+            "datr": Unzuckify.DATR_REGEX.search(page.text).group(1),
+            "lsd": Unzuckify.LSD_REGEX.search(page.text).group(1),
+            "initial_request_id": Unzuckify.INITIAL_REQUEST_ID_REGEX.search(page.text).group(1),
         }
 
     def do_login(self, unauthenticated_page_data):
-        url = "https://www.messenger.com/login/password/"
-        self.logger.debug(f"[http] POST {url}")
+        self.logger.debug(f"[http] POST {Unzuckify.LOGIN_URL}")
         self.messenger_session.post(
-            url,
+            Unzuckify.LOGIN_URL,
             cookies={"datr": unauthenticated_page_data["datr"]},
             data={
                 "lsd": unauthenticated_page_data["lsd"],
@@ -99,25 +110,19 @@ class Unzuckify:
         )
 
     def get_chat_page_data(self):
-        url = "https://www.messenger.com"
-        self.logger.debug(f"[http] GET {url}")
+        self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL}")
         page = self.messenger_session.get(
-            url,
+            Unzuckify.ROOT_URL,
             allow_redirects=True,
         )
-        with open("/tmp/page.html", "w") as f:
-            f.write(page.text)
-        maybe_schema_match = re.search(
-            r'"schemaVersion"\s*:\s*"([^"]+)"', page.text
-        ) or re.search(r'\\"version\\":([0-9]{2,})', page.text)
+        maybe_schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(page.text) or Unzuckify.VERSION_REGEX.search(page.text)
         return {
-            "device_id": re.search(
-                r'"(?:deviceId|clientID)"\s*:\s*"([^"]+)"', page.text
-            ).group(1),
+            "device_id": Unzuckify.DEVICE_ID_REGEX.search(page.text).group(1),
             "maybe_schema_version": maybe_schema_match and maybe_schema_match.group(1),
-            "dtsg": re.search(r'DTSG.{,20}"token":"([^"]+)"', page.text).group(1),
+            "dtsg": Unzuckify.DTSG_REGEX.search(page.text).group(1),
+            # TODO why is this sorted?
             "scripts": sorted(
-                set(re.findall(r'"([^"]+rsrc\.php/[^"]+\.js[^"]+)"', page.text))
+                set(Unzuckify.SCRIPTS_REGEX.findall(page.text))
             ),
         }
 
@@ -131,8 +136,6 @@ class Unzuckify:
         schema_version = (
             chat_page_data["maybe_schema_version"] or script_data["maybe_schema_version"]
         )
-        url = "https://www.messenger.com/api/graphql/"
-        self.logger.debug(f"[http] POST {url}")
 
         # TODO make more readable
         timestamp = int(datetime.datetime.now().timestamp() * 1000)
@@ -172,8 +175,9 @@ class Unzuckify:
                     "task_id": 0,
                 },
             )
+        self.logger.debug(f"[http] POST {Unzuckify.API_URL}")
         self.messenger_session.post(
-            url,
+            Unzuckify.API_URL,
             data={
                 "doc_id": script_data["query_id"],
                 "fb_dtsg": chat_page_data["dtsg"],
@@ -194,14 +198,13 @@ class Unzuckify:
             },
         )
     def get_inbox_js(self, chat_page_data, script_data):
-        url = "https://www.messenger.com/api/graphql/"
-        self.logger.debug(f"[http] POST {url}")
+        self.logger.debug(f"[http] POST {Unzuckify.API_URL}")
         schema_version = (
             chat_page_data["maybe_schema_version"] or script_data["maybe_schema_version"]
         )
         assert schema_version
         graph = self.messenger_session.post(
-            url,
+            Unzuckify.API_URL,
             data={
                 "doc_id": script_data["query_id"],
                 "fb_dtsg": chat_page_data["dtsg"],
@@ -300,17 +303,14 @@ def get_script_data(chat_page_data):
         if "LSPlatformGraphQLLightspeedRequestQuery" not in script.text:
             continue
 
-        maybe_schema_match = re.search(
-            r'__d\s*\(\s*"LSVersion".{,50}exports\s*=\s*"([0-9]+)"', script.text
-        )
+        maybe_schema_match = Unzuckify.LSVERSION_REGEX.search(script.text)
 
         return {
-            "query_id": re.search(
-                r'id:\s*"([0-9]+)".{,50}name:\s*"LSPlatformGraphQLLightspeedRequestQuery"',
-                script.text,
-            ).group(1),
+            "query_id": Unzuckify.QUERY_ID_REGEX.search(script.text).group(1),
             "maybe_schema_version": maybe_schema_match and maybe_schema_match.group(1),
         }
+
+    # TODO change return type
     assert False, "no script had LSPlatformGraphQLLightspeedRequestQuery"
 
 
@@ -337,8 +337,6 @@ def read_lightspeed_call(node):
     ):
         return None
     return [node_to_literal(node) for node in node.arguments]
-
-
 
 
 def convert_fbid(l):
@@ -400,9 +398,6 @@ def get_inbox_data(inbox_js):
         "users": users,
         "conversations": conversations,
     }
-
-
-
 
 
 def parse_args():
