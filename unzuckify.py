@@ -40,6 +40,7 @@ class Unzuckify:
 
     def __init__(self, config: Dict) -> None:
         self.config = config
+        self.global_cookies = dict()
 
         # logging setup
         self.logger = logging.getLogger("unzuckify")
@@ -292,9 +293,11 @@ class Unzuckify:
 
         self.messenger_session.cookies.clear()
         with open(self.config["cookie_file_path"]) as f:
-            cookies = json.load(f).get(self.config["auth_info"]["email"])
+            self.global_cookies = json.load(f)
 
-        self.messenger_session.cookies.update(cookies)
+        self.messenger_session.cookies.update(
+            self.global_cookies.get(self.config["auth_info"]["email"])
+        )
         return
 
     def save_cookies(self) -> None:
@@ -304,14 +307,14 @@ class Unzuckify:
         :rtype: None
         """
 
-        path = self.config["cookie_file_path"]
+        path = self.config.get("cookie_file_path", "./cookies.json")
         os.makedirs(os.path.abspath(os.path.dirname(path)), exist_ok=True)
-        cookie_dict = {
-            self.config["auth_info"]["email"]: dict(self.messenger_session.cookies)
-        }
+        self.global_cookies[self.config["auth_info"]["email"]] = dict(
+            self.messenger_session.cookies
+        )
 
         with open(path, "w") as f:
-            json.dump(cookie_dict, f)
+            json.dump(self.global_cookies, f)
 
     def clear_cookies(self) -> None:
         """
@@ -323,9 +326,15 @@ class Unzuckify:
 
         self.messenger_session.cookies.clear()
 
-        path = self.config["cookie_file_path"]
+        path = self.config.get("cookie_file_path", "./cookies.json")
         if os.path.exists(path):
-            os.remove(path)
+            with open(path, "r") as f:
+                self.global_cookies = json.load(f)
+                if self.config["auth_info"]["email"] in self.global_cookies:
+                    del self.global_cookies[self.config["auth_info"]["email"]]
+
+            with open(path, "w") as f:
+                json.dump(self.global_cookies, f)
 
 
 def messenger_err_hook(http_response: requests.Response, *args, **kwargs) -> None:
