@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
 import argparse
-import collections
 import datetime
 import json
 import logging
 import os
 import random
 import re
-from typing import Dict, Optional, Set
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional, Set
 
 import esprima
 import requests
@@ -87,15 +87,28 @@ class Unzuckify:
 
         if args.cmd == "inbox":
             inbox_js = self.get_inbox_js(**chat_page_data)
+            conversations = get_inbox_data(inbox_js, args.unread_only)
 
-            inbox_data = get_inbox_data(inbox_js)
+            if not conversations:
+                return
 
-            # inbox_data is a dict of users and conversations items
-            # TODO first - do we want to change the return type?
-            # second - how should we interpret this data?
+            # log a digest of all conversations in inbox
+            if len(conversations) > 1:
+                digest = f"{len(conversations)} thread updates:"
+            else:
+                digest = "1 thread update:"
 
-            print(json.dumps(inbox_data))  # TODO should be logged
-            # TODO further process this json object
+            for thread_info in conversations.values():
+                digest += (
+                    f"\n{thread_info['group_name']} - {thread_info['last_message']}"
+                )
+
+            self.logger.info(digest)
+
+            if args.mark_read:
+                for thread_id, thread_info in conversations.items():
+                    if thread_info["unread"]:
+                        self.interact_with_thread(**chat_page_data, thread_id=thread_id)
 
         elif args.cmd == "read":
             for thread_id in args.thread:
@@ -390,12 +403,27 @@ def read_lightspeed_call(node):
     return [node_to_literal(node) for node in node.arguments]
 
 
-def convert_fbid(l):
+def convert_fbid(l: Iterable[int]) -> int:
+    """
+    Given an iterable of length two containing ints,
+    return the "fbid" of the iterable.
+
+    :param l:
+    :type l: Iterable
+    :return: The "fbid" of the iterable
+    :rtype: int
+    """
+
     return (2**32) * l[0] + l[1]
 
 
-def get_inbox_data(inbox_js) -> Dict[str, Dict]:
-    lightspeed_calls = collections.defaultdict(list)
+def get_inbox_data(inbox_js, unread_only: bool = False) -> List[Dict]:
+    my_user_id = None
+    user_name_lookup = dict()
+    conversations = dict()
+    conversation_participants = defaultdict(list)
+
+    lightspeed_calls = defaultdict(list)
 
     def delegate(node, meta):
         # TODO simplify this
@@ -407,8 +435,34 @@ def get_inbox_data(inbox_js) -> Dict[str, Dict]:
 
     esprima.parseScript(inbox_js, delegate=delegate)
 
-    users = dict()
-    conversations = dict()
+    # retrieve a list of users to map their IDs to their names
+    for args in lightspeed_calls["verifyContactRowExists"]:
+        user_id, _, _, name, *rest = args
+        user_id = convert_fbid(user_id)
+        _, _, _, is_me = [arg for arg in rest if isinstance(arg, bool)]
+
+        if is_me:
+            my_user_id = user_id
+
+        user_name_lookup[user_id] = name
+
+    assert my_user_id, "Current user's user ID was not found"
+
+    # retrieve participant lists for all conversations
+    for args in lightspeed_calls["addParticipantIdToGroupThread"]:
+        thread_id, user_id, *rest = args
+        user_id = convert_fbid(user_id)
+
+        # skip adding "me" as a participant to threads
+        if user_id == my_user_id:
+            continue
+
+        conversation_participants[convert_fbid(thread_id)].append(
+            user_name_lookup[user_id]
+        )
+
+    # retrieve all conversations
+    # TODO deal with edge-case of having your own "note-to-self" chat
 
     for args in lightspeed_calls["deleteThenInsertThread"]:
         last_sent_ts, last_read_ts, last_msg, group_name, *rest = args
@@ -417,41 +471,31 @@ def get_inbox_data(inbox_js) -> Dict[str, Dict]:
         ][
             :2
         ]  # TODO what's with the [:2] at the end?
-        conversations[convert_fbid(thread_id)] = {
-            "unread": last_sent_ts != last_read_ts,
-            "last_message": last_msg,
-            "last_message_author": convert_fbid(last_msg_author),
-            "group_name": group_name,
-            "participants": list(),
-        }
 
-    for args in lightspeed_calls["addParticipantIdToGroupThread"]:
-        thread_id, user_id, *rest = args
-        conversations[convert_fbid(thread_id)]["participants"].append(
-            convert_fbid(user_id)
-        )
+        if unread_only and last_sent_ts == last_read_ts:
+            continue
 
-    for args in lightspeed_calls["verifyContactRowExists"]:
-        user_id, _, _, name, *rest = args
-        _, _, _, is_me = [arg for arg in rest if isinstance(arg, bool)]
-        users[convert_fbid(user_id)] = {"name": name, "is_me": is_me}
+        else:
+            thread_id = convert_fbid(thread_id)
 
-    for user_id in users:
-        if all(user_id in c["participants"] for c in conversations.values()):
-            my_user_id = user_id
-            break
+            # skip empty conversations
+            # TODO what about groups where everyone was removed except you?
+            if not conversation_participants[thread_id]:
+                continue
 
-    my_user_ids = [uid for uid in users if users[uid]["is_me"]]
-    assert len(my_user_ids) == 1  # TODO handle exception
-    (my_user_id,) = my_user_ids
+            # Set the "group name" to all participants if it's None
+            if group_name is None:
+                group_name = ", ".join(conversation_participants[thread_id])
 
-    for conversation in conversations.values():
-        conversation["participants"].remove(my_user_id)
+            conversations[thread_id] = {
+                "unread": last_sent_ts != last_read_ts,
+                "last_message": last_msg,
+                "last_message_author": user_name_lookup[convert_fbid(last_msg_author)],
+                "group_name": group_name,
+                "participants": conversation_participants[thread_id],
+            }
 
-    return {
-        "users": users,
-        "conversations": conversations,
-    }
+    return conversations
 
 
 def parse_args() -> argparse.Namespace:
@@ -477,6 +521,17 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="cmd")
     cmd_inbox = subparsers.add_parser("inbox")
+    cmd_inbox.add_argument(
+        "-u",
+        "--unread-only",
+        action="store_true",
+        help="If set, only return threads with unread messages",
+    )
+    cmd_inbox.add_argument(
+        "--mark-read",
+        action="store_true",
+        help="If set, mark all currently unread threads in the inbox as read",
+    )
     cmd_send = subparsers.add_parser("send")
     cmd_send.add_argument(
         "-t",
