@@ -2,11 +2,10 @@
 name = "unzuckify"
 version = "0.1.0"
 description = "Helps remove Daddy Zuck from my life"
-authors = ["Radian LLC <contact+unzuckify@radian.codes>"]
+authors = ["Radian LLC <contact+unzuckify@radian.codes>", "Scott Conway <me@conway.scot>"]
 
 [tool.poetry.dependencies]
 python = "^3.8"
-xdg = "^5.1.1"
 requests = "^2.26.0"
 esprima = "^4.0.1"
 

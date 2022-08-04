@@ -1,10 +1,15 @@
 {
-    "verbose": false,
+    "auth_info": {
+        "email": "",
+        "password": ""
+    },
+    "cookie_file_path": "./cookies.json",
     "logging": {
-        "log_level": 30,
+        "log_level": 20,
         "gotify": {
             "app_token": "",
-            "server_url": ""
+            "server_url": "",
+            "alert_on_log_level": 30
         }
     }
 }

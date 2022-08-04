@@ -1,133 +1,73 @@
 # Unzuckify
 
-This repository has a small Python application which allows me to
-receive an email notification when somebody sends me a Facebook
-message.
+This repository contains a small Python application which allows me to
+receive a notification when somebody sends me a Facebook message.
 
-## Why?
+This is forked from Radian Software's repo,
+which can be found [here](https://github.com/radian-software/unzuckify).
 
-I don't like Facebook as a company, and I don't want to support them
-by using their products, including Messenger. However, when I came
-around to this point of view, I already had a number of existing
-contacts on Messenger. I migrated everyone I talked to regularly onto
-other platforms, but in case someone messaged me out of the blue, I
-still wanted to know about that, so I could redirect them onto Signal
-or SMS.
+## Fork Differences
+* Increased flexibility in bridging options with logging handlers (not just for email!)
+* Usage of a configuration file instead of command-line args for user credentials
 
-With the help of this application, I can make sure I won't miss it
-when a very old contact happens to message me on Facebook, while not
-having to ever actively check Messenger or keep it on my phone.
+For more information on the project, see [Radian Software's readme](https://github.com/radian-software/unzuckify).
 
-## How?
+## Requirements
+* python > 3.8
+* esprima
+* requests
 
-I reverse-engineered the Messenger authentication flow and the
-[recently
-rewritten](https://engineering.fb.com/2020/03/02/data-infrastructure/messenger/)
-GraphQL API, and created a command-line utility that can,
-in the same manner as the browser:
+## Configuration Setup
+See `config.json.example` for an example configuration file.
 
-* Fetch the list of threads that would show up on Messenger, their
-  names, the users in each thread, the last message that was sent, who
-  sent it, and whether it is unread according to the server.
-* Send a message to a thread.
-* Mark a thread as read if it is unread.
+### `auth_info`
+This section contains the email and password fields used to authenticate to messenger.
 
-This all turned out to be fairly straightforward. The protocol and
-code is obfuscated, but nowhere near enough to foil basic reverse
-engineering techniques.
+### `cookie_file_path`
+If specified, store cookies in the noted path. Defaults to `./cookies.json`.
 
-After creating the command-line utility, I wrote a Bash script that
-wrapped it with the following logic:
+### `logging`
+`log_level` - sets the log level to subscribe to
+`gotify` - only required if you wish to use gotify as a logging destination - see [gotify-handler](https://github.com/scottmconway/gotify-handler)
 
-1. Fetch my list of threads.
-2. Identify any threads that have unread messages and use
-   [SendGrid](https://sendgrid.com/) to notify me about them via
-   email.
-3. Mark those threads as read.
-4. Login to a separate Facebook account and send my primary account a
-   random inspirational quote by direct message.
-5. In step 2, the notifications for messages from the account in step
-   4 are sent to a separate email address that is monitored by [Dead
-   Man's Snitch](https://deadmanssnitch.com/). This, combined with
-   step 4, ensures that as long as everything is in working order,
-   Dead Man's Snitch will get an email every time I run the script.
+## Arguments
+|Short Name|Long Name|Type|Description|
+|-|-|-|-|
+||action|`str`|`inbox`, `send`, or `read` - the command to execute|
+||`--config`|`str`|Path to config file - defaults to `./config.json`|
+|`-ll`|`--log-level`|`int`|If specified, overrides the log\_level parameter in the config file|
+|`-n`|`--no-cookies`|`bool`|If set, ignore locally cached cookies|
 
-Then I run the script on a cron job every few hours. If I get a
-message, it's forwarded to email. If the API changes out from under
-me, or something else goes wrong, I also get an email because Dead
-Man's Snitch will stop receiving notifications.
+Following are the arguments for each action:
 
-## Prior work
+`inbox`:
+|Short Name|Long Name|Type|Description|
+|-|-|-|-|
+|`-u`|`--unread-only`|`bool`|If set, only return threads with unread messages|
+||`--mark-read`|`bool`|If set, mark all currently unread threads in the inbox as read|
 
-I previously used [Messenger
-Mirror](https://github.com/radian-software/messenger-mirror) to
-accomplish the same thing as this project. However, because Messenger
-Mirror relied on having an entire Chrome instance running in Selenium
-24/7, I didn't want to have that running on my laptop (it would eat
-resources for no good reason). Unfortunately, after a couple weeks,
-Facebook banned the IP for my VPS, so I couldn't run the application
-there anymore. This is what inspired me to try reverse engineering the
-browser API directly, since if I did that, it would be far less
-resource intensive to run the application on my laptop in the
-background.
+`read`:
+|Short Name|Long Name|Type|Description|
+|-|-|-|-|
+|`-t`|`--thread`|`int`|The ID(s) of the thread(s) in which to send a read receipt|
+
+`send`:
+|Short Name|Long Name|Type|Description|
+|-|-|-|-|
+|`-t`|`--thread`|`int`|The ID of the thread in which to send a message|
+|`m`|`--message`|`str`|Content of the message to send|
 
 ## Setup
 
-If you just want to use the CLI (perhaps as proof of concept for
-developing your own Messenger client using the reverse engineered
-API), setup is quite simple. Install
-[Poetry](https://python-poetry.org/), run `poetry install` and `poetry
-shell`, then you are good to go:
+If you just want to use the CLI (perhaps as proof of concept for developing your own Messenger client using the reverse engineered API), setup is quite simple. Install [Poetry](https://python-poetry.org/), run poetry install and poetry shell, then you are good to go.
+
+## Usage
+
+The aformentioned arguments paint a pretty good picture of what you can do with this script,
+but here's _exactly_ how I use it.
+My goal is to log new, unread messages to gotify, and then mark them as read (so I don't get alerted about them on the next execution).
+To do so, I run the following as a cronjob:
 
 ```
-% ./unzuckify.py -u you@example.com -p your-password -v inbox
-% ./unzuckify.py -u you@example.com -p your-password -v send
-    -t thread-id-from-inbox -m "Some text message"
-% ./unzuckify.py -u you@example.com -p your-password -v read
-    -t thread-id-from-inbox
-```
-
-Cookies are automatically cached in `~/.cache/unzuckify/cookies.json`,
-and are separated per email address so you can use different accounts
-in parallel. Omit `-v` to not log all the intermediate debugging info.
-Only `inbox` prints to stdout, and the output is JSON.
-
-If you additionally want to set up a Messenger-to-email bridge like I
-have, then you should install [jq](https://stedolan.github.io/jq/) and
-sign up for a free [SendGrid](https://sendgrid.com/) account. Also go
-to [Heroku](https://heroku.com/), provision a [Dead Man's
-Snitch](https://deadmanssnitch.com/) addon, and get the email endpoint
-for the snitch. Then create a `.env` file in the repo as follows:
-
-```bash
-PRIMARY_EMAIL=you@example.com  # facebook login
-PRIMARY_PASSWORD='your-password'
-
-SECONDARY_EMAIL=finsta@example.com  # 2nd account login
-SECONDARY_PASSWORD='other-password'
-
-SENDGRID_API_KEY=SG.REDACTED  # from SendGrid
-SENTINEL_EMAIL=some-hash@nosnch.in  # from Dead Man's Snitch
-SENTINEL_NAME='John Smith'  # Facebook name of 2nd account
-
-FROM_EMAIL=you@example.com  # SendGrid verified sender
-TO_EMAIL=you@example.com  # where to receive notifications
-```
-
-Note for `FROM_EMAIL`, ideally you own a domain and can prove
-ownership of it, and this email is on that domain. According to the
-SendGrid documentation, if you use something like a Gmail address,
-your notifications are likely to get flagged by spam filters because
-it can be proven that Gmail was not actually the one to send the
-email, which looks suspicious. If you don't own a personal domain, may
-I suggest doing business with [Namecheap](https://namecheap.com/) and
-[Forward Email](https://forwardemail.net/en)?
-
-Now you just need to set up the script to run on a semi-regular basis,
-for example by creating a cron job:
-
-```bash
-crontab - <<"EOF"
-0 */3 * * * sh -c '. "$HOME/.profile" && ~/dev/unzuckify/unzuckify.bash'
-EOF
+*/5 * * * * cd $UNZUCK_DIR; python3 unzuckify.py inbox --unread-only --mark-read
 ```
