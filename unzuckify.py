@@ -8,7 +8,7 @@ import logging
 import os
 import random
 import re
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 
 import esprima
 import requests
@@ -27,9 +27,9 @@ class Unzuckify:
         r'name="initial_request_id"\s+value="([^"]+)"'
     )
     SCHEMA_VERSION_REGEX = re.compile(r'"schemaVersion"\s*:\s*"([^"]+)"')
-    VERSION_REGEX = re.compile(r'\\"version\\":([0-9]{2,})')
-    DEVICE_ID_REGEX = re.compile(r'"(?:deviceId|clientID)"\s*:\s*"([^"]+)"')
-    DTSG_REGEX = re.compile(r'DTSG.{,20}"token":"([^"]+)"')
+    VERSION_REGEX = re.compile(r'"version\":([0-9]{2,})')
+    DEVICE_ID_REGEX = re.compile(r'"(?:deviceId|clientID|device_id)"\s*:\s*"([^\"]+)"')
+    DTSG_REGEX = re.compile(r'DTSG.+"token":"([^"]+)"')
     SCRIPTS_REGEX = re.compile(r'"([^"]+rsrc\.php/[^"]+\.js[^"]+)"')
     LSVERSION_REGEX = re.compile(
         r'__d\s*\(\s*"LSVersion".{,50}exports\s*=\s*"([0-9]+)"'
@@ -54,11 +54,13 @@ class Unzuckify:
 
         # messenger session setup
         self.messenger_session = requests.Session()
-        self.messenger_session.hooks[
-            "response"
-        ] = lambda r, *args, **kwargs: r.raise_for_status()
+        self.messenger_session.hooks["response"] = messenger_err_hook
 
     def do_main(self, args):
+        """
+        (presently) main function to execute the user's will
+        """
+
         chat_page_data = None
         if not args.no_cookies:
             self.logger.debug(f"[cookie] READ {self.config['cookie_file_path']}")
@@ -66,6 +68,7 @@ class Unzuckify:
                 self.load_cookies()
                 chat_page_data = self.get_chat_page_data()
 
+            # TODO log this if it's not just an expired session cookie
             except BaseException:
                 pass
 
@@ -79,12 +82,20 @@ class Unzuckify:
             self.save_cookies()
             chat_page_data = self.get_chat_page_data()
 
-        assert chat_page_data, "auth failed"  # TODO handle exception
+        if not chat_page_data:
+            raise Exception("Authentication failure")
 
         if args.cmd == "inbox":
             inbox_js = self.get_inbox_js(**chat_page_data)
+
             inbox_data = get_inbox_data(inbox_js)
+
+            # inbox_data is a dict of users and conversations items
+            # TODO first - do we want to change the return type?
+            # second - how should we interpret this data?
+
             print(json.dumps(inbox_data))  # TODO should be logged
+            # TODO further process this json object
 
         elif args.cmd == "read":
             for thread_id in args.thread:
@@ -104,6 +115,7 @@ class Unzuckify:
 
         :rtype: None
         """
+
         # grab necessary values from the root site before authenticating
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL} (unauthenticated)")
         page = self.messenger_session.get(Unzuckify.ROOT_URL)
@@ -128,6 +140,8 @@ class Unzuckify:
             },
         )
 
+        return
+
     def get_chat_page_data(self) -> Dict:
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL}")
         page = self.messenger_session.get(Unzuckify.ROOT_URL)
@@ -139,7 +153,8 @@ class Unzuckify:
 
         return_dict = {
             "device_id": Unzuckify.DEVICE_ID_REGEX.search(page.text).group(1),
-            "schema_version": schema_match and schema_match.group(1),
+            "schema_version": schema_match
+            and schema_match.group(1),  # TODO why the and?
             "dtsg": Unzuckify.DTSG_REGEX.search(page.text).group(1),
         }
 
@@ -149,13 +164,13 @@ class Unzuckify:
 
     def interact_with_thread(
         self,
-        schema_version,
+        schema_version: str,
         query_id: str,
         dtsg: str,
         device_id: str,
-        thread_id,
-        message=None,
-    ):
+        thread_id: int,
+        message: Optional[str] = None,
+    ) -> None:
 
         # TODO make more readable
         timestamp = int(datetime.datetime.now().timestamp() * 1000)
@@ -175,6 +190,7 @@ class Unzuckify:
                 "task_id": 1,
             }
         ]
+
         if message:
             otid = epoch + random.randrange(2**22)
             tasks.insert(
@@ -218,7 +234,11 @@ class Unzuckify:
             },
         )
 
-    def get_inbox_js(self, schema_version, query_id: str, dtsg: str, device_id) -> str:
+        return
+
+    def get_inbox_js(
+        self, schema_version: str, query_id: str, dtsg: str, device_id: str
+    ) -> str:
         self.logger.debug(f"[http] POST {Unzuckify.API_URL}")
         graph = self.messenger_session.post(
             Unzuckify.API_URL,
@@ -229,17 +249,26 @@ class Unzuckify:
                     {
                         "deviceId": device_id,
                         "requestId": 0,
-                        "requestPayload": {
-                            "database": 1,
-                            "version": schema_version,
-                            "sync_params": {},
-                        },
+                        "requestPayload": json.dumps(
+                            {
+                                "database": 1,
+                                "version": schema_version,
+                                "sync_params": json.dumps({}),
+                            }
+                        ),
                         "requestType": 1,
                     }
                 ),
             },
         )
-        return graph.json()["data"]["viewer"]["lightspeed_web_request"]["payload"]
+
+        res_js = graph.json()
+        if "errors" in res_js:
+            raise Exception(
+                f"Exception retrieving inbox - {res_js['errors'][0]['message']}"
+            )
+
+        return res_js["data"]["viewer"]["lightspeed_web_request"]["payload"]
 
     def load_cookies(self) -> None:
         """
@@ -263,7 +292,7 @@ class Unzuckify:
         """
 
         path = self.config["cookie_file_path"]
-        path.parent.mkdir(parents=True, exist_ok=True)
+        os.makedirs(os.path.abspath(os.path.dirname(path)), exist_ok=True)
         cookie_dict = {
             self.config["auth_info"]["email"]: dict(self.messenger_session.cookies)
         }
@@ -286,6 +315,21 @@ class Unzuckify:
             os.remove(path)
 
 
+def messenger_err_hook(http_response: requests.Response, *args, **kwargs) -> None:
+    http_response.raise_for_status()
+
+    # TODO verify login errors, such as these
+    # should only come from a response to a POST to the login endpoint
+    """
+    Please re-enter your password
+    The password you’ve entered is incorrect.
+
+    Incorrect Email
+    The email you entered isn’t connected to an account. Find your account and log in.
+    """
+    return
+
+
 def get_script_data(script_urls: Set[str]) -> Dict:
     """
     Given a list of script URLS,
@@ -299,18 +343,19 @@ def get_script_data(script_urls: Set[str]) -> Dict:
     """
 
     for script_url in script_urls:
-        res = requests.get(script_url)
-        res.raise_for_status()
+        script_res = requests.get(script_url)
+        script_res.raise_for_status()
 
-        if "LSPlatformGraphQLLightspeedRequestQuery" not in res.text:
+        # TODO this should instead check for both regexes working
+        if "LSPlatformGraphQLLightspeedRequestQuery" not in script_res.text:
             continue
 
-        maybe_schema_match = Unzuckify.LSVERSION_REGEX.search(res.text)
+        maybe_schema_match = Unzuckify.LSVERSION_REGEX.search(script_res.text)
 
         return {
             "query_id": Unzuckify.QUERY_ID_REGEX.search(script_res.text).group(1),
             "schema_version": maybe_schema_match and maybe_schema_match.group(1),
-        }
+        }  # TODO why the and?
 
     raise Exception("LSPlatformGraphQLLightspeedRequestQuery not found")
 
@@ -356,6 +401,7 @@ def get_inbox_data(inbox_js) -> Dict[str, Dict]:
         # TODO simplify this
         if not (args := read_lightspeed_call(node)):
             return
+
         (fn, *args) = args
         lightspeed_calls[fn].append(args)
 
@@ -408,18 +454,49 @@ def get_inbox_data(inbox_js) -> Dict[str, Dict]:
     }
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser("unzuckify")
-    parser.add_argument("--config", type=str, default="./config.json")
-    parser.add_argument("-ll", "--log-level", type=int, default=None)
-    parser.add_argument("-n", "--no-cookies", action="store_true")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="./config.json",
+        help="Path to config file - defaults to ./config.json",
+    )
+    parser.add_argument(
+        "-ll",
+        "--log-level",
+        type=int,
+        default=None,
+        help="If specified, overrides the log_level parameter in the config file",
+    )
+    parser.add_argument(
+        "-n",
+        "--no-cookies",
+        action="store_true",
+        help="If set, ignore locally cached cookies",
+    )
     subparsers = parser.add_subparsers(dest="cmd")
     cmd_inbox = subparsers.add_parser("inbox")
     cmd_send = subparsers.add_parser("send")
-    cmd_send.add_argument("-t", "--thread", required=True, type=int)
-    cmd_send.add_argument("-m", "--message", required=True)
+    cmd_send.add_argument(
+        "-t",
+        "--thread",
+        required=True,
+        type=int,
+        help="The ID of the thread in which to send a message",
+    )
+    cmd_send.add_argument(
+        "-m", "--message", required=True, help="Content of the message to send"
+    )
     cmd_read = subparsers.add_parser("read")
-    cmd_read.add_argument("-t", "--thread", required=True, type=int, action="append")
+    cmd_read.add_argument(
+        "-t",
+        "--thread",
+        required=True,
+        type=int,
+        action="append",
+        help="The ID of the thread(s) in which to send a read receipt",
+    )
     return parser.parse_args()
 
 
@@ -440,7 +517,12 @@ def main():
         config["cookie_file_path"] = "./cookies.json"
 
     zuck = Unzuckify(config)
-    zuck.do_main(args)
+    try:
+        zuck.do_main(args)
+    except BaseException as be:
+        zuck.logger.exception(
+            f'Exception during execution "{type(be).__name__}" - {be}'
+        )
 
 
 if __name__ == "__main__":
