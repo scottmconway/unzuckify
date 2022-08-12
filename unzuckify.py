@@ -156,7 +156,20 @@ class Unzuckify:
 
         return
 
-    def get_chat_page_data(self) -> Dict:
+    def get_chat_page_data(self) -> Dict[str, str]:
+        """
+        Given a logged-in messenger session,
+        returns all parameters needed for interacting with threads.
+
+        Those values are as follows:
+            device_id
+            dtsg
+            query_id
+            schema_version
+
+        :return: A dict containing the above parameters
+        :rtype: Dict[str, str]
+        """
         self.logger.debug(f"[http] GET {Unzuckify.ROOT_URL}")
         page = self.messenger_session.get(Unzuckify.ROOT_URL)
         schema_match = Unzuckify.SCHEMA_VERSION_REGEX.search(
@@ -185,6 +198,23 @@ class Unzuckify:
         thread_id: int,
         message: Optional[str] = None,
     ) -> None:
+        # TODO better docs
+        """
+
+        :param schema_version:
+        :type schema_version: str
+        :param query_id:
+        :type query_id: str
+        :param dtsg:
+        :type dtsg: str
+        :param device_id:
+        :type device_id: str
+        :param thread_id: The ID of the thread to interact with
+        :type thread_id: int
+        :param message: If specified, a message to send to the given thread
+        :type message: Optional[str]
+        :rtype: None
+        """
 
         # TODO make more readable
         timestamp = int(datetime.datetime.now().timestamp() * 1000)
@@ -412,7 +442,7 @@ def read_lightspeed_call(node):
     return [node_to_literal(node) for node in node.arguments]
 
 
-def convert_fbid(l: Iterable[int]) -> int:
+def convert_fbid(l: List[int]) -> int:
     """
     Given an iterable of length two containing ints,
     return the "fbid" of the iterable.
@@ -426,11 +456,11 @@ def convert_fbid(l: Iterable[int]) -> int:
     return (2**32) * l[0] + l[1]
 
 
-def get_inbox_data(inbox_js, unread_only: bool = False) -> List[Dict]:
+def get_inbox_data(inbox_js, unread_only: bool = False) -> Dict:
     my_user_id = None
     user_name_lookup = dict()
     conversations = dict()
-    conversation_participants = defaultdict(list)
+    conversation_participants = defaultdict(set)
 
     lightspeed_calls = defaultdict(list)
 
@@ -466,20 +496,38 @@ def get_inbox_data(inbox_js, unread_only: bool = False) -> List[Dict]:
         if user_id == my_user_id:
             continue
 
-        conversation_participants[convert_fbid(thread_id)].append(
+        conversation_participants[convert_fbid(thread_id)].add(
             user_name_lookup[user_id]
         )
 
     # retrieve all conversations
     # TODO deal with edge-case of having your own "note-to-self" chat
 
+    # For whatever reason, the websocket response likes to duplicate some responses
     for args in lightspeed_calls["deleteThenInsertThread"]:
-        last_sent_ts, last_read_ts, last_msg, group_name, *rest = args
-        thread_id, last_msg_author = [
-            arg for arg in rest if isinstance(arg, list) and arg[0] > 0
-        ][
-            :2
-        ]  # TODO what's with the [:2] at the end?
+        # TODO determine if this thing is a  message request
+        # doesn't matter?
+        (
+            last_sent_ts,
+            last_read_ts,
+            last_msg,
+            group_name,
+            some_url_0,
+            thing_0,
+            int_array_0,
+            thread_id,
+            int_array_1,
+            int_array_2,
+            msg_status,
+            some_url_1,
+            int_array_3,
+            int_array_4,
+            int_array_5,
+            int_array_6,
+            bool_0,
+            last_author,
+            *rest,
+        ) = args
 
         if unread_only and last_sent_ts == last_read_ts:
             continue
@@ -492,6 +540,16 @@ def get_inbox_data(inbox_js, unread_only: bool = False) -> List[Dict]:
             if not conversation_participants[thread_id]:
                 continue
 
+            # TODO figure out what kind of message this is
+            # or rather, what zone it's in
+            #
+            # eg. normal  - "inbox"
+            # msg request - "pending"
+            if msg_status == "pending":
+                is_msg_request = True
+            else:
+                is_msg_request = False
+
             # Set the "group name" to all participants if it's None
             if group_name is None:
                 group_name = ", ".join(conversation_participants[thread_id])
@@ -499,9 +557,12 @@ def get_inbox_data(inbox_js, unread_only: bool = False) -> List[Dict]:
             conversations[thread_id] = {
                 "unread": last_sent_ts != last_read_ts,
                 "last_message": last_msg,
-                "last_message_author": user_name_lookup[convert_fbid(last_msg_author)],
+                "last_message_author": user_name_lookup[convert_fbid(last_author)],
                 "group_name": group_name,
-                "participants": conversation_participants[thread_id],
+                "is_message_request": is_msg_request,
+                "participants": list(
+                    conversation_participants[thread_id]
+                ),  # for JSON serializability
             }
 
     return conversations
